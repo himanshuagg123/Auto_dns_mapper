@@ -1,38 +1,71 @@
-import os
-import boto3
 import json
+import os
 
-# Environment variables
-DOMAIN_NAME = os.environ.get('DOMAIN_NAME')  # e.g., himanshutest.in
-ROUTE53_ZONE_ID = os.environ.get('ROUTE53_ZONE_ID')  # your hosted zone ID
+import boto3
+
+# Global Variables
+DOMAIN_NAME = os.environ['DOMAIN_NAME']
+ROUTE53_ZONE_ID = os.environ['ROUTE53_ZONE_ID']
+AWS_PRIMARY_REGION = os.environ['AWS_PRIMARY_REGION']
+AWS_ACCESS_KEY_ID = os.environ['AWS_ACCESS_KEY_ID']
+AWS_SECRET_ACCESS_KEY = os.environ['AWS_SECRET_ACCESS_KEY']
+
 
 class IpToDNSMapper:
     """
-    Class to map an EC2 instance's public IP to a Route 53 DNS record
+    Class to map an EC2 instance's public IP to a Route 53 DNS record.
+
+    Attributes:
+        instance_id (str): The ID of the EC2 instance.
+        _ipv4 (str): The public IPv4 address of the EC2 instance.
+        _dns_str (str): The DNS name to be associated with the instance.
+        _ec2_client (boto3.client): Client to interact with EC2.
+        _route53_client (boto3.client): Client to interact with Route 53.
     """
 
     def __init__(self, instance_id) -> None:
+        """
+        Initializes the IpToDNSMapper object with the instance ID and AWS clients.
+
+        Args:
+            instance_id (str): The ID of the EC2 instance.
+        """
         self._instance_id = instance_id
         self._ipv4 = ""
         self._dns_str = ""
+        self._dns_prefix = "autodns-"
 
-        # Use default boto3 clients with IAM role permissions
-        self._ec2_client = boto3.client('ec2')
-        self._route53_client = boto3.client('route53')
+        # Initialize EC2 and Route 53 clients
+        aws_session = boto3.Session(
+            region_name=AWS_PRIMARY_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        )
+        self._ec2_client = aws_session.client('ec2')
+        self._route53_client = aws_session.client('route53')
 
     def _delete_route53_record_set(self) -> bool:
+        """
+        Deletes a Route 53 DNS record if it exists.
+
+        Returns:
+            bool: True if the DNS record was successfully deleted.
+        """
         try:
+            # Get existing Route 53 record set details
             record_desc = self._route53_client.list_resource_record_sets(
                 HostedZoneId=ROUTE53_ZONE_ID,
-                StartRecordName=f'{self._dns_str}.{DOMAIN_NAME}',
+                StartRecordName=f'{self._dns_prefix}{self._dns_str}.{DOMAIN_NAME}',
                 StartRecordType='A',
                 MaxItems='1'
             )['ResourceRecordSets'][0]
 
-            if record_desc['Name'] != f'{self._dns_str}.{DOMAIN_NAME}.':
-                print(f"Record mismatch: {record_desc['Name']} != {self._dns_str}.{DOMAIN_NAME}.")
+            # Verify if the record matches the instance DNS
+            if record_desc['Name'] != f'{self._dns_prefix}{self._dns_str}.{DOMAIN_NAME}.':
+                print(f"Record mismatch: {record_desc['Name']} != {self._dns_prefix}{self._dns_str}.{DOMAIN_NAME}.")
                 return False
 
+            # Delete the Route 53 record
             delete_res = self._route53_client.change_resource_record_sets(
                 HostedZoneId=ROUTE53_ZONE_ID,
                 ChangeBatch={
@@ -56,6 +89,12 @@ class IpToDNSMapper:
             return False
 
     def _create_route53_record_set(self) -> bool:
+        """
+        Creates or updates a Route 53 DNS record to map the instance's IP.
+
+        Returns:
+            bool: True if DNS record creation was successful.
+        """
         try:
             response = self._route53_client.change_resource_record_sets(
                 HostedZoneId=ROUTE53_ZONE_ID,
@@ -65,7 +104,7 @@ class IpToDNSMapper:
                         {
                             'Action': 'UPSERT',
                             'ResourceRecordSet': {
-                                'Name': f'{self._dns_str}.{DOMAIN_NAME}',
+                                'Name': f'{self._dns_prefix}{self._dns_str}.{DOMAIN_NAME}',
                                 'ResourceRecords': [{'Value': self._ipv4}],
                                 'TTL': 300,
                                 'Type': 'A',
@@ -81,15 +120,30 @@ class IpToDNSMapper:
             return False
 
     def set_dns(self) -> bool:
+        """
+        Maps the EC2 instance's public IP to a Route 53 DNS record.
+        Deletes the DNS record if the instance is terminated.
+        If the instance is stopped, it sets the IP to 127.0.0.1.
+
+        Returns:
+            bool: True if DNS record creation/deletion was successful.
+        """
         try:
+            # Describe the EC2 instance
             ec2_described = self._ec2_client.describe_instances(InstanceIds=[self._instance_id])['Reservations'][0]['Instances'][0]
             instance_state = ec2_described['State']['Name']
 
+            # Get DNS name from instance tags
             self._dns_str = next(
-                (tag['Value'].strip().lower() for tag in ec2_described.get('Tags', []) if tag['Key'].strip().lower() == 'dns'),
+                (tag['Value'].strip().lower() for tag in ec2_described['Tags'] if tag['Key'].strip().lower() == 'dns'),
                 ""
             )
 
+            if not self._dns_str:
+                print("No DNS tag found for the instance.")
+                return False
+
+            # Handle instance state
             if instance_state == 'terminated':
                 return self._delete_route53_record_set()
             elif instance_state == 'running':
@@ -102,10 +156,22 @@ class IpToDNSMapper:
             print(f"Error in set_dns: {e}")
             return False
 
+
 def lambda_handler(event, context):
+    """
+    AWS Lambda handler function that sets the DNS for an EC2 instance.
+
+    Args:
+        event (dict): The event data from AWS Lambda, containing instance details.
+        context (dict): The runtime information from AWS Lambda.
+
+    Returns:
+        dict: Status code and message indicating function execution.
+    """
     print(event)
     obj = IpToDNSMapper(event['detail']['instance-id'])
     success = obj.set_dns()
+
     return {
         'statusCode': 200 if success else 500,
         'body': json.dumps('Function executed' if success else 'Function failed')
