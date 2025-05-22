@@ -7,8 +7,6 @@ import boto3
 DOMAIN_NAME = os.environ['DOMAIN_NAME']
 ROUTE53_ZONE_ID = os.environ['ROUTE53_ZONE_ID']
 AWS_PRIMARY_REGION = os.environ['AWS_PRIMARY_REGION']
-AWS_ACCESS_KEY_ID = os.environ['AWS_ACCESS_KEY_ID']
-AWS_SECRET_ACCESS_KEY = os.environ['AWS_SECRET_ACCESS_KEY']
 
 
 class IpToDNSMapper:
@@ -38,8 +36,7 @@ class IpToDNSMapper:
         # Initialize EC2 and Route 53 clients
         aws_session = boto3.Session(
             region_name=AWS_PRIMARY_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+           
         )
         self._ec2_client = aws_session.client('ec2')
         self._route53_client = aws_session.client('route53')
